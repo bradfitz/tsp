@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,6 +70,7 @@ var rootCmd = &ffcli.Command{
 	Subcommands: []*ffcli.Command{
 		newMachineKeyCmd,
 		newNodeKeyCmd,
+		newNodeCmd,
 		registerCmd,
 		mapCmd,
 		discoverServerKeyCmd,
@@ -159,27 +161,159 @@ func runDiscoverServerKey(ctx context.Context, args []string) error {
 	return writeOutput(discoverServerKeyArgs.output, text)
 }
 
-// register
+// nodeFile is the JSON structure for a consolidated node file
+// containing all credentials and server info needed for register/map.
+type nodeFile struct {
+	NodeKey    string `json:"node_key"`
+	MachineKey string `json:"machine_key"`
+	ServerURL  string `json:"server_url"`
+	ServerKey  string `json:"server_key"`
+}
 
-var registerArgs struct {
+// readNodeFile reads a node JSON file and returns the parsed keys, server URL,
+// and server public key.
+func readNodeFile(path string) (_ key.NodePrivate, _ key.MachinePrivate, serverURL string, _ key.MachinePublic, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, err
+	}
+	var nf nodeFile
+	if err := json.Unmarshal(data, &nf); err != nil {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("parsing node file %q: %w", path, err)
+	}
+
+	// Parse node key
+	nkText := []byte(strings.TrimSpace(nf.NodeKey))
+	if !bytes.HasPrefix(nkText, []byte(nodeKeyPrefix)) {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: node_key does not have %q prefix", path, nodeKeyPrefix)
+	}
+	nkText = bytes.Replace(nkText, []byte(nodeKeyPrefix), []byte(oldKeyPrefix), 1)
+	var nodeKey key.NodePrivate
+	if err := nodeKey.UnmarshalText(nkText); err != nil {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing node_key: %w", path, err)
+	}
+
+	// Parse machine key
+	mkText := []byte(strings.TrimSpace(nf.MachineKey))
+	if !bytes.HasPrefix(mkText, []byte(machineKeyPrefix)) {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: machine_key does not have %q prefix", path, machineKeyPrefix)
+	}
+	mkText = bytes.Replace(mkText, []byte(machineKeyPrefix), []byte(oldKeyPrefix), 1)
+	var machineKey key.MachinePrivate
+	if err := machineKey.UnmarshalText(mkText); err != nil {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing machine_key: %w", path, err)
+	}
+
+	// Parse server key
+	var serverKey key.MachinePublic
+	if err := serverKey.UnmarshalText([]byte(strings.TrimSpace(nf.ServerKey))); err != nil {
+		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing server_key: %w", path, err)
+	}
+
+	return nodeKey, machineKey, nf.ServerURL, serverKey, nil
+}
+
+// new-node
+
+var newNodeArgs struct {
 	nodeKeyFile    string
 	machineKeyFile string
 	output         string
-	hostname       string
-	ephemeral      bool
-	authKey        string
-	tags           string
-	tailnet        string
+}
+
+var newNodeCmd = &ffcli.Command{
+	Name:       "new-node",
+	ShortUsage: "tsp [-s url] [--control-key file] new-node [-n node-key-file] [-m machine-key-file] [-o output]",
+	ShortHelp:  "Generate a new node JSON file with keys and server info.",
+	FlagSet: (func() *flag.FlagSet {
+		fs := flag.NewFlagSet("new-node", flag.ExitOnError)
+		fs.StringVar(&newNodeArgs.nodeKeyFile, "n", "", "existing node key file (default: generate new)")
+		fs.StringVar(&newNodeArgs.machineKeyFile, "m", "", "existing machine key file (default: generate new)")
+		fs.StringVar(&newNodeArgs.output, "o", "", "output file (default: stdout)")
+		return fs
+	})(),
+	Exec: runNewNode,
+}
+
+func runNewNode(ctx context.Context, args []string) error {
+	var nodeKey key.NodePrivate
+	if newNodeArgs.nodeKeyFile != "" {
+		var err error
+		nodeKey, err = readNodeKeyFile(newNodeArgs.nodeKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading node key: %w", err)
+		}
+	} else {
+		nodeKey = key.NewNode()
+	}
+
+	var machineKey key.MachinePrivate
+	if newNodeArgs.machineKeyFile != "" {
+		var err error
+		machineKey, err = readMachineKeyFile(newNodeArgs.machineKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading machine key: %w", err)
+		}
+	} else {
+		machineKey = key.NewMachine()
+	}
+
+	serverURL := cmp.Or(globalArgs.serverURL, tsp.DefaultServerURL)
+
+	var serverKey key.MachinePublic
+	if globalArgs.controlKeyFile != "" {
+		var err error
+		serverKey, err = readControlKeyFile(globalArgs.controlKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading control key: %w", err)
+		}
+	} else {
+		var err error
+		serverKey, err = tsp.DiscoverServerKey(ctx, serverURL)
+		if err != nil {
+			return fmt.Errorf("discovering server key: %w", err)
+		}
+	}
+
+	serverKeyText, err := serverKey.MarshalText()
+	if err != nil {
+		return fmt.Errorf("marshaling server key: %w", err)
+	}
+
+	nf := nodeFile{
+		NodeKey:    string(marshalNodeKey(nodeKey)),
+		MachineKey: string(marshalMachineKey(machineKey)),
+		ServerURL:  serverURL,
+		ServerKey:  string(serverKeyText),
+	}
+
+	out, err := json.MarshalIndent(nf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding node file: %w", err)
+	}
+	out = append(out, '\n')
+	return writeOutput(newNodeArgs.output, out)
+}
+
+// register
+
+var registerArgs struct {
+	nodeFile  string
+	output    string
+	hostname  string
+	ephemeral bool
+	authKey   string
+	tags      string
+	tailnet   string
 }
 
 var registerCmd = &ffcli.Command{
 	Name:       "register",
-	ShortUsage: "tsp [-s url] register -n <node-key-file> -m <machine-key-file> [flags]",
+	ShortUsage: "tsp [-s url] register -n <node-file> [flags]",
 	ShortHelp:  "Register a node key with a coordination server.",
 	FlagSet: (func() *flag.FlagSet {
 		fs := flag.NewFlagSet("register", flag.ExitOnError)
-		fs.StringVar(&registerArgs.nodeKeyFile, "n", "", "node key file (required)")
-		fs.StringVar(&registerArgs.machineKeyFile, "m", "", "machine key file (required)")
+		fs.StringVar(&registerArgs.nodeFile, "n", "", "node JSON file (required)")
 		fs.StringVar(&registerArgs.output, "o", "", "output file (default: stdout)")
 		fs.StringVar(&registerArgs.hostname, "hostname", "", "hostname to register")
 		fs.BoolVar(&registerArgs.ephemeral, "ephemeral", false, "register as ephemeral node")
@@ -192,20 +326,13 @@ var registerCmd = &ffcli.Command{
 }
 
 func runRegister(ctx context.Context, args []string) error {
-	if registerArgs.nodeKeyFile == "" {
-		return fmt.Errorf("flag -n (node key file) is required")
-	}
-	if registerArgs.machineKeyFile == "" {
-		return fmt.Errorf("flag -m (machine key file) is required")
+	if registerArgs.nodeFile == "" {
+		return fmt.Errorf("flag -n (node file) is required")
 	}
 
-	nodeKey, err := readNodeKeyFile(registerArgs.nodeKeyFile)
+	nodeKey, machineKey, nfServerURL, serverKey, err := readNodeFile(registerArgs.nodeFile)
 	if err != nil {
-		return fmt.Errorf("reading node key: %w", err)
-	}
-	machineKey, err := readMachineKeyFile(registerArgs.machineKeyFile)
-	if err != nil {
-		return fmt.Errorf("reading machine key: %w", err)
+		return fmt.Errorf("reading node file: %w", err)
 	}
 
 	hi := hostinfo.New()
@@ -219,7 +346,7 @@ func runRegister(ctx context.Context, args []string) error {
 	}
 
 	client, err := tsp.NewClient(tsp.ClientOpts{
-		ServerURL:  globalArgs.serverURL,
+		ServerURL:  cmp.Or(globalArgs.serverURL, nfServerURL),
 		MachineKey: machineKey,
 	})
 	if err != nil {
@@ -233,6 +360,8 @@ func runRegister(ctx context.Context, args []string) error {
 			return fmt.Errorf("reading control key: %w", err)
 		}
 		client.SetControlPublicKey(controlKey)
+	} else {
+		client.SetControlPublicKey(serverKey)
 	}
 
 	resp, err := client.Register(ctx, tsp.RegisterOpts{
@@ -266,21 +395,21 @@ func runRegister(ctx context.Context, args []string) error {
 // map
 
 var mapArgs struct {
-	nodeKeyFile    string
-	machineKeyFile string
-	stream         bool
-	output         string
+	nodeFile string
+	stream   bool
+	peers    bool
+	output   string
 }
 
 var mapCmd = &ffcli.Command{
 	Name:       "map",
-	ShortUsage: "tsp [-s url] map -n <node-key-file> -m <machine-key-file> [-stream]",
+	ShortUsage: "tsp [-s url] map -n <node-file> [-stream]",
 	ShortHelp:  "Send a map request to the coordination server.",
 	FlagSet: (func() *flag.FlagSet {
 		fs := flag.NewFlagSet("map", flag.ExitOnError)
-		fs.StringVar(&mapArgs.nodeKeyFile, "n", "", "node key file (required)")
-		fs.StringVar(&mapArgs.machineKeyFile, "m", "", "machine key file (required)")
+		fs.StringVar(&mapArgs.nodeFile, "n", "", "node JSON file (required)")
 		fs.BoolVar(&mapArgs.stream, "stream", false, "stream map responses")
+		fs.BoolVar(&mapArgs.peers, "peers", true, "include peers in map response")
 		fs.StringVar(&mapArgs.output, "o", "", "output file (default: stdout)")
 		return fs
 	})(),
@@ -288,26 +417,23 @@ var mapCmd = &ffcli.Command{
 }
 
 func runMap(ctx context.Context, args []string) error {
-	if mapArgs.nodeKeyFile == "" {
-		return fmt.Errorf("flag -n (node key file) is required")
-	}
-	if mapArgs.machineKeyFile == "" {
-		return fmt.Errorf("flag -m (machine key file) is required")
+	if mapArgs.nodeFile == "" {
+		return fmt.Errorf("flag -n (node file) is required")
 	}
 
-	nodeKey, err := readNodeKeyFile(mapArgs.nodeKeyFile)
+	nodeKey, machineKey, nfServerURL, serverKey, err := readNodeFile(mapArgs.nodeFile)
 	if err != nil {
-		return fmt.Errorf("reading node key: %w", err)
+		return fmt.Errorf("reading node file: %w", err)
 	}
-	machineKey, err := readMachineKeyFile(mapArgs.machineKeyFile)
-	if err != nil {
-		return fmt.Errorf("reading machine key: %w", err)
+
+	if globalArgs.serverURL != "" && globalArgs.serverURL != nfServerURL {
+		return fmt.Errorf("server URL mismatch: -s flag is %q but node file is for %q", globalArgs.serverURL, nfServerURL)
 	}
 
 	hi := hostinfo.New()
 
 	client, err := tsp.NewClient(tsp.ClientOpts{
-		ServerURL:  globalArgs.serverURL,
+		ServerURL:  cmp.Or(globalArgs.serverURL, nfServerURL),
 		MachineKey: machineKey,
 	})
 	if err != nil {
@@ -321,26 +447,34 @@ func runMap(ctx context.Context, args []string) error {
 			return fmt.Errorf("reading control key: %w", err)
 		}
 		client.SetControlPublicKey(controlKey)
+	} else {
+		client.SetControlPublicKey(serverKey)
 	}
 
 	session, err := client.Map(ctx, tsp.MapOpts{
-		NodeKey:  nodeKey,
-		Hostinfo: hi,
-		Stream:   mapArgs.stream,
+		NodeKey:   nodeKey,
+		Hostinfo:  hi,
+		Stream:    mapArgs.stream,
+		OmitPeers: !mapArgs.peers,
 	})
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 
+	gotResponse := false
 	for {
 		resp, err := session.Next()
 		if err == io.EOF {
+			if !gotResponse {
+				return fmt.Errorf("server returned no map response")
+			}
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("reading map response: %w", err)
 		}
+		gotResponse = true
 
 		out, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
