@@ -28,6 +28,17 @@ const (
 	oldKeyPrefix     = "privkey:"
 )
 
+var globalArgs struct {
+	// serverURL is the base URL of the coordination server (-s flag).
+	// If empty, tsp.DefaultServerURL is used.
+	serverURL string
+
+	// controlKeyFile is a path to a file containing the server's
+	// MachinePublic key in MarshalText form (--control-key flag).
+	// When set, server key discovery is skipped.
+	controlKeyFile string
+}
+
 func main() {
 	args := os.Args[1:]
 	if err := rootCmd.Parse(args); err != nil {
@@ -46,12 +57,19 @@ func main() {
 
 var rootCmd = &ffcli.Command{
 	Name:       "tsp",
-	ShortUsage: "tsp <subcommand> [flags]",
+	ShortUsage: "tsp [-s url] <subcommand> [flags]",
 	ShortHelp:  "Low-level Tailscale protocol tool.",
+	FlagSet: (func() *flag.FlagSet {
+		fs := flag.NewFlagSet("tsp", flag.ExitOnError)
+		fs.StringVar(&globalArgs.serverURL, "s", "", "base URL of coordination server (default: "+tsp.DefaultServerURL+")")
+		fs.StringVar(&globalArgs.controlKeyFile, "control-key", "", "file containing the server's public key (skips discovery)")
+		return fs
+	})(),
 	Subcommands: []*ffcli.Command{
 		newMachineKeyCmd,
 		newNodeKeyCmd,
 		registerCmd,
+		discoverServerKeyCmd,
 	},
 	Exec: func(ctx context.Context, args []string) error {
 		return flag.ErrHelp
@@ -108,12 +126,42 @@ func runNewNodeKey(ctx context.Context, args []string) error {
 	return writeOutput(newNodeKeyArgs.output, text)
 }
 
+// discover-server-key
+
+var discoverServerKeyArgs struct {
+	output string
+}
+
+var discoverServerKeyCmd = &ffcli.Command{
+	Name:       "discover-server-key",
+	ShortUsage: "tsp [-s url] discover-server-key [-o file]",
+	ShortHelp:  "Discover and print the coordination server's public key.",
+	FlagSet: (func() *flag.FlagSet {
+		fs := flag.NewFlagSet("discover-server-key", flag.ExitOnError)
+		fs.StringVar(&discoverServerKeyArgs.output, "o", "", "output file (default: stdout)")
+		return fs
+	})(),
+	Exec: runDiscoverServerKey,
+}
+
+func runDiscoverServerKey(ctx context.Context, args []string) error {
+	k, err := tsp.DiscoverServerKey(ctx, globalArgs.serverURL)
+	if err != nil {
+		return err
+	}
+	text, err := k.MarshalText()
+	if err != nil {
+		return fmt.Errorf("marshaling server key: %w", err)
+	}
+	text = append(text, '\n')
+	return writeOutput(discoverServerKeyArgs.output, text)
+}
+
 // register
 
 var registerArgs struct {
 	nodeKeyFile    string
 	machineKeyFile string
-	serverURL      string
 	output         string
 	hostname       string
 	ephemeral      bool
@@ -124,13 +172,12 @@ var registerArgs struct {
 
 var registerCmd = &ffcli.Command{
 	Name:       "register",
-	ShortUsage: "tsp register -n <node-key-file> -m <machine-key-file> [flags]",
+	ShortUsage: "tsp [-s url] register -n <node-key-file> -m <machine-key-file> [flags]",
 	ShortHelp:  "Register a node key with a coordination server.",
 	FlagSet: (func() *flag.FlagSet {
 		fs := flag.NewFlagSet("register", flag.ExitOnError)
 		fs.StringVar(&registerArgs.nodeKeyFile, "n", "", "node key file (required)")
 		fs.StringVar(&registerArgs.machineKeyFile, "m", "", "machine key file (required)")
-		fs.StringVar(&registerArgs.serverURL, "u", "", "server URL (default: controlplane.tailscale.com)")
 		fs.StringVar(&registerArgs.output, "o", "", "output file (default: stdout)")
 		fs.StringVar(&registerArgs.hostname, "hostname", "", "hostname to register")
 		fs.BoolVar(&registerArgs.ephemeral, "ephemeral", false, "register as ephemeral node")
@@ -169,14 +216,22 @@ func runRegister(ctx context.Context, args []string) error {
 		tags = strings.Split(registerArgs.tags, ",")
 	}
 
-	client, err := tsp.NewClient(ctx, tsp.ClientOpts{
-		ServerURL:  registerArgs.serverURL,
+	client, err := tsp.NewClient(tsp.ClientOpts{
+		ServerURL:  globalArgs.serverURL,
 		MachineKey: machineKey,
 	})
 	if err != nil {
 		return fmt.Errorf("creating client: %w", err)
 	}
 	defer client.Close()
+
+	if globalArgs.controlKeyFile != "" {
+		controlKey, err := readControlKeyFile(globalArgs.controlKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading control key: %w", err)
+		}
+		client.SetControlPublicKey(controlKey)
+	}
 
 	resp, err := client.Register(ctx, tsp.RegisterOpts{
 		NodeKey:   nodeKey,
@@ -264,6 +319,20 @@ func readNodeKeyFile(path string) (key.NodePrivate, error) {
 	var k key.NodePrivate
 	if err := k.UnmarshalText(text); err != nil {
 		return key.NodePrivate{}, err
+	}
+	return k, nil
+}
+
+// readControlKeyFile reads a file containing a server's MachinePublic key
+// in its MarshalText form (e.g. "mkey:...").
+func readControlKeyFile(path string) (key.MachinePublic, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return key.MachinePublic{}, err
+	}
+	var k key.MachinePublic
+	if err := k.UnmarshalText(bytes.TrimSpace(data)); err != nil {
+		return key.MachinePublic{}, fmt.Errorf("parsing control key from %q: %w", path, err)
 	}
 	return k, nil
 }

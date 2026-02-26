@@ -68,6 +68,11 @@ func (c *Client) Register(ctx context.Context, opts RegisterOpts) (*tailcfg.Regi
 		return nil, fmt.Errorf("encoding register request: %w", err)
 	}
 
+	nc, err := c.noiseClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("establishing noise connection: %w", err)
+	}
+
 	url := c.serverURL + "/machine/register"
 	url = strings.Replace(url, "http:", "https:", 1)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
@@ -76,7 +81,7 @@ func (c *Client) Register(ctx context.Context, opts RegisterOpts) (*tailcfg.Regi
 	}
 	ts2021.AddLBHeader(req, opts.NodeKey.Public())
 
-	res, err := c.nc.Do(req)
+	res, err := nc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("register request: %w", err)
 	}
