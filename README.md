@@ -46,19 +46,39 @@ Discover and print the coordination server's public key.
 tsp [-s url] discover-server-key [-o file]
 ```
 
-#### register
+#### new-node
 
-Register a node key with a coordination server.
+Generate a new node JSON file bundling machine key, node key, server URL,
+and server public key. If `-n` or `-m` are omitted, new keys are generated.
+The server key is discovered automatically unless `--control-key` is given.
 
 ```
-tsp [-s url] [--control-key file] register -n <node-key-file> -m <machine-key-file> [flags]
+tsp [-s url] [--control-key file] new-node [-n node-key-file] [-m machine-key-file] [-o output]
+```
+
+The resulting JSON file looks like:
+
+```json
+{
+  "node_key": "node-privkey:...",
+  "machine_key": "machine-privkey:...",
+  "server_url": "https://controlplane.tailscale.com",
+  "server_key": "mkey:..."
+}
+```
+
+#### register
+
+Register a node with a coordination server using a node JSON file.
+
+```
+tsp [-s url] [--control-key file] register -n <node-file> [flags]
 ```
 
 Flags:
 
 ```
--n <file>          Node key file (required)
--m <file>          Machine key file (required)
+-n <file>          Node JSON file (required)
 -o <file>          Output file (default: stdout)
 --hostname <name>  Hostname to register
 --ephemeral        Register as ephemeral node
@@ -67,18 +87,55 @@ Flags:
 --tailnet <name>   Tailnet to register in
 ```
 
+#### map
+
+Send a map request to the coordination server.
+
+```
+tsp [-s url] [--control-key file] map -n <node-file> [-stream] [-peers=false] [-o file]
+```
+
+Flags:
+
+```
+-n <file>          Node JSON file (required)
+-o <file>          Output file (default: stdout)
+-stream            Stream map responses
+-peers             Include peers in response (default: true)
+```
+
 ### Example workflow
 
+Using a node file (recommended):
+
 ```sh
-# Generate keys
+# Generate a node file (discovers server key automatically)
+tsp new-node -o node.json
+
+# Register
+tsp register -n node.json --auth-key tskey-auth-...
+
+# One-shot map
+tsp map -n node.json
+
+# Streaming map
+tsp map -n node.json -stream
+
+# Map without peers
+tsp map -n node.json -peers=false
+```
+
+Using pre-existing key files:
+
+```sh
+# Generate keys separately
 tsp new-machine-key -o machine.key
 tsp new-node-key -o node.key
 
-# Optionally cache the server's public key
-tsp discover-server-key -o server.pub
+# Bundle into a node file
+tsp new-node -m machine.key -n node.key -o node.json
 
-# Register (with cached server key to skip discovery)
-tsp --control-key server.pub register -n node.key -m machine.key --auth-key tskey-auth-...
-
-tsp register -n node.key -m machine.key --auth-key tskey-auth-...
+# Register and map using the node file
+tsp register -n node.json --auth-key tskey-auth-...
+tsp map -n node.json
 ```
