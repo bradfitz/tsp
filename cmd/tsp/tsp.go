@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -69,6 +70,7 @@ var rootCmd = &ffcli.Command{
 		newMachineKeyCmd,
 		newNodeKeyCmd,
 		registerCmd,
+		mapCmd,
 		discoverServerKeyCmd,
 	},
 	Exec: func(ctx context.Context, args []string) error {
@@ -259,6 +261,96 @@ func runRegister(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "AuthURL: %s\n", resp.AuthURL)
 	}
 	return nil
+}
+
+// map
+
+var mapArgs struct {
+	nodeKeyFile    string
+	machineKeyFile string
+	stream         bool
+	output         string
+}
+
+var mapCmd = &ffcli.Command{
+	Name:       "map",
+	ShortUsage: "tsp [-s url] map -n <node-key-file> -m <machine-key-file> [-stream]",
+	ShortHelp:  "Send a map request to the coordination server.",
+	FlagSet: (func() *flag.FlagSet {
+		fs := flag.NewFlagSet("map", flag.ExitOnError)
+		fs.StringVar(&mapArgs.nodeKeyFile, "n", "", "node key file (required)")
+		fs.StringVar(&mapArgs.machineKeyFile, "m", "", "machine key file (required)")
+		fs.BoolVar(&mapArgs.stream, "stream", false, "stream map responses")
+		fs.StringVar(&mapArgs.output, "o", "", "output file (default: stdout)")
+		return fs
+	})(),
+	Exec: runMap,
+}
+
+func runMap(ctx context.Context, args []string) error {
+	if mapArgs.nodeKeyFile == "" {
+		return fmt.Errorf("flag -n (node key file) is required")
+	}
+	if mapArgs.machineKeyFile == "" {
+		return fmt.Errorf("flag -m (machine key file) is required")
+	}
+
+	nodeKey, err := readNodeKeyFile(mapArgs.nodeKeyFile)
+	if err != nil {
+		return fmt.Errorf("reading node key: %w", err)
+	}
+	machineKey, err := readMachineKeyFile(mapArgs.machineKeyFile)
+	if err != nil {
+		return fmt.Errorf("reading machine key: %w", err)
+	}
+
+	hi := hostinfo.New()
+
+	client, err := tsp.NewClient(tsp.ClientOpts{
+		ServerURL:  globalArgs.serverURL,
+		MachineKey: machineKey,
+	})
+	if err != nil {
+		return fmt.Errorf("creating client: %w", err)
+	}
+	defer client.Close()
+
+	if globalArgs.controlKeyFile != "" {
+		controlKey, err := readControlKeyFile(globalArgs.controlKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading control key: %w", err)
+		}
+		client.SetControlPublicKey(controlKey)
+	}
+
+	session, err := client.Map(ctx, tsp.MapOpts{
+		NodeKey:  nodeKey,
+		Hostinfo: hi,
+		Stream:   mapArgs.stream,
+	})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	for {
+		resp, err := session.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reading map response: %w", err)
+		}
+
+		out, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding response: %w", err)
+		}
+		out = append(out, '\n')
+		if err := writeOutput(mapArgs.output, out); err != nil {
+			return err
+		}
+	}
 }
 
 // marshalMachineKey serializes a MachinePrivate with a "machine-privkey:" prefix.
