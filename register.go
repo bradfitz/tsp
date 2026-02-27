@@ -34,9 +34,6 @@ type RegisterOpts struct {
 
 	// Tags is a list of ACL tags to request.
 	Tags []string
-
-	// Tailnet is the tailnet to register in.
-	Tailnet string
 }
 
 // Register sends a registration request to the coordination server
@@ -55,7 +52,6 @@ func (c *Client) Register(ctx context.Context, opts RegisterOpts) (*tailcfg.Regi
 		NodeKey:   opts.NodeKey.Public(),
 		Hostinfo:  hi,
 		Ephemeral: opts.Ephemeral,
-		Tailnet:   opts.Tailnet,
 	}
 	if opts.AuthKey != "" {
 		regReq.Auth = &tailcfg.RegisterResponseAuth{

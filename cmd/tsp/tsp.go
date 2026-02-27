@@ -304,7 +304,6 @@ var registerArgs struct {
 	ephemeral bool
 	authKey   string
 	tags      string
-	tailnet   string
 }
 
 var registerCmd = &ffcli.Command{
@@ -319,7 +318,6 @@ var registerCmd = &ffcli.Command{
 		fs.BoolVar(&registerArgs.ephemeral, "ephemeral", false, "register as ephemeral node")
 		fs.StringVar(&registerArgs.authKey, "auth-key", "", "pre-authorized auth key")
 		fs.StringVar(&registerArgs.tags, "tags", "", "comma-separated ACL tags")
-		fs.StringVar(&registerArgs.tailnet, "tailnet", "", "tailnet to register in")
 		return fs
 	})(),
 	Exec: runRegister,
@@ -370,7 +368,6 @@ func runRegister(ctx context.Context, args []string) error {
 		Ephemeral: registerArgs.ephemeral,
 		AuthKey:   registerArgs.authKey,
 		Tags:      tags,
-		Tailnet:   registerArgs.tailnet,
 	})
 	if err != nil {
 		return err

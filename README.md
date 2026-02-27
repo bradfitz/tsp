@@ -84,7 +84,6 @@ Flags:
 --ephemeral        Register as ephemeral node
 --auth-key <key>   Pre-authorized auth key
 --tags <tags>      Comma-separated ACL tags
---tailnet <name>   Tailnet to register in
 ```
 
 #### map
