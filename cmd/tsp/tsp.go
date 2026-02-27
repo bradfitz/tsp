@@ -318,7 +318,7 @@ var registerCmd = &ffcli.Command{
 		fs.StringVar(&registerArgs.output, "o", "", "output file (default: stdout)")
 		fs.StringVar(&registerArgs.hostname, "hostname", "", "hostname to register")
 		fs.BoolVar(&registerArgs.ephemeral, "ephemeral", false, "register as ephemeral node")
-		fs.StringVar(&registerArgs.authKey, "auth-key", "", "pre-authorized auth key")
+		fs.StringVar(&registerArgs.authKey, "auth-key", "", "pre-authorized auth key or file containing one")
 		fs.StringVar(&registerArgs.tags, "tags", "", "comma-separated ACL tags")
 		return fs
 	})(),
@@ -345,6 +345,11 @@ func runRegister(ctx context.Context, args []string) error {
 		tags = strings.Split(registerArgs.tags, ",")
 	}
 
+	authKey, err := resolveAuthKey(registerArgs.authKey)
+	if err != nil {
+		return err
+	}
+
 	client, err := tsp.NewClient(tsp.ClientOpts{
 		ServerURL:  cmp.Or(globalArgs.serverURL, nfServerURL),
 		MachineKey: machineKey,
@@ -368,7 +373,7 @@ func runRegister(ctx context.Context, args []string) error {
 		NodeKey:   nodeKey,
 		Hostinfo:  hi,
 		Ephemeral: registerArgs.ephemeral,
-		AuthKey:   registerArgs.authKey,
+		AuthKey:   authKey,
 		Tags:      tags,
 	})
 	if err != nil {
@@ -575,6 +580,23 @@ func readControlKeyFile(path string) (key.MachinePublic, error) {
 		return key.MachinePublic{}, fmt.Errorf("parsing control key from %q: %w", path, err)
 	}
 	return k, nil
+}
+
+// resolveAuthKey returns the auth key from v. If v is empty, it returns "".
+// If v starts with "tskey-", it's used directly. Otherwise v is treated as a
+// filename and its contents are read and trimmed.
+func resolveAuthKey(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(v), "tskey-") {
+		return strings.TrimSpace(v), nil
+	}
+	data, err := os.ReadFile(v)
+	if err != nil {
+		return "", fmt.Errorf("reading auth key file: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func writeOutput(path string, data []byte) error {
