@@ -111,6 +111,7 @@ func (c *Client) Map(ctx context.Context, opts MapOpts) (*MapSession, error) {
 		Stream:    opts.Stream,
 		Compress:  "zstd",
 		OmitPeers: opts.OmitPeers,
+		ReadOnly:  true,
 	}
 
 	body, err := json.Marshal(mapReq)

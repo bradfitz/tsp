@@ -49,8 +49,8 @@ type Client struct {
 	logf      logger.Logf
 
 	mu        sync.Mutex
-	nc        *ts2021.Client     // nil until noiseClient called
-	serverPub key.MachinePublic  // zero until set or discovered
+	nc        *ts2021.Client    // nil until noiseClient called
+	serverPub key.MachinePublic // zero until set or discovered
 }
 
 // NewClient creates a new Client configured to talk to the coordination server
