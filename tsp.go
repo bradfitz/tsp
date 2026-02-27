@@ -6,10 +6,13 @@
 package tsp
 
 import (
+	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -162,6 +165,69 @@ func (c *Client) noiseClient(ctx context.Context) (*ts2021.Client, error) {
 	}
 	c.nc = nc
 	return nc, nil
+}
+
+// AnswerC2NPing handles a c2n PingRequest from the control plane by parsing the
+// embedded HTTP request in the payload, routing it locally, and POSTing the HTTP
+// response back to pr.URL using doNoiseRequest. The POST is done in a new
+// goroutine so this method does not block.
+//
+// It reports whether the ping was handled. Unhandled pings (nil pr, non-c2n
+// types, or unrecognized c2n paths) return false.
+func (c *Client) AnswerC2NPing(ctx context.Context, pr *tailcfg.PingRequest, doNoiseRequest func(*http.Request) (*http.Response, error)) (handled bool) {
+	if pr == nil || pr.Types != "c2n" {
+		return false
+	}
+
+	// Parse the HTTP request from the payload.
+	httpReq, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(pr.Payload)))
+	if err != nil {
+		c.logf("parsing c2n ping payload: %v", err)
+		return false
+	}
+
+	// Route the request locally.
+	var httpResp *http.Response
+	switch httpReq.URL.Path {
+	case "/echo":
+		body, _ := io.ReadAll(httpReq.Body)
+		httpResp = &http.Response{
+			StatusCode:    200,
+			Status:        "200 OK",
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			Header:        http.Header{},
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+		}
+	default:
+		c.logf("ignoring c2n ping request for unhandled path %q", httpReq.URL.Path)
+		return false
+	}
+
+	// Serialize the HTTP response.
+	var buf bytes.Buffer
+	if err := httpResp.Write(&buf); err != nil {
+		c.logf("serializing c2n ping response: %v", err)
+		return false
+	}
+
+	// Send the response back to the control plane over the Noise channel.
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, "POST", pr.URL, &buf)
+		if err != nil {
+			c.logf("creating c2n ping reply request: %v", err)
+			return
+		}
+		resp, err := doNoiseRequest(req)
+		if err != nil {
+			c.logf("sending c2n ping reply: %v", err)
+			return
+		}
+		resp.Body.Close()
+	}()
+	return true
 }
 
 // Close closes the client and releases resources.

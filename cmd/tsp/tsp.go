@@ -16,11 +16,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/bradfitz/tsp"
 	"github.com/peterbourgon/ff/v3/ffcli"
 	"tailscale.com/hostinfo"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
 
@@ -395,6 +397,7 @@ var mapArgs struct {
 	nodeFile string
 	stream   bool
 	peers    bool
+	quiet    bool
 	output   string
 }
 
@@ -407,6 +410,7 @@ var mapCmd = &ffcli.Command{
 		fs.StringVar(&mapArgs.nodeFile, "n", "", "node JSON file (required)")
 		fs.BoolVar(&mapArgs.stream, "stream", false, "stream map responses")
 		fs.BoolVar(&mapArgs.peers, "peers", true, "include peers in map response")
+		fs.BoolVar(&mapArgs.quiet, "quiet", true, "suppress keepalives and handled c2n ping requests from output")
 		fs.StringVar(&mapArgs.output, "o", "", "output file (default: stdout)")
 		return fs
 	})(),
@@ -472,6 +476,19 @@ func runMap(ctx context.Context, args []string) error {
 			return fmt.Errorf("reading map response: %w", err)
 		}
 		gotResponse = true
+
+		if pr := resp.PingRequest; pr != nil && pr.Types == "c2n" {
+			if client.AnswerC2NPing(ctx, pr, session.NoiseRoundTrip) && mapArgs.quiet {
+				resp.PingRequest = nil
+			}
+		}
+		if mapArgs.quiet {
+			resp.KeepAlive = false
+		}
+
+		if isZeroMapResponse(resp) {
+			continue
+		}
 
 		out, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
@@ -566,4 +583,15 @@ func writeOutput(path string, data []byte) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+// isZeroMapResponse reports whether all fields of resp are zero values.
+func isZeroMapResponse(resp *tailcfg.MapResponse) bool {
+	v := reflect.ValueOf(*resp)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return false
+		}
+	}
+	return true
 }
