@@ -114,14 +114,11 @@ tsp new-node -o node.json
 # Register
 tsp register -n node.json --auth-key tskey-auth-...
 
-# One-shot map
+# Get inital map response & exit
 tsp map -n node.json
 
-# Streaming map
+# Get map response + stream of updates, forever
 tsp map -n node.json -stream
-
-# Map without peers
-tsp map -n node.json -peers=false
 ```
 
 Using pre-existing key files:
