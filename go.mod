@@ -1,10 +1,10 @@
 module github.com/bradfitz/tsp
 
-go 1.25.7
+go 1.26.1
 
 require (
 	github.com/peterbourgon/ff/v3 v3.4.0
-	tailscale.com v0.0.0
+	tailscale.com v1.96.5
 )
 
 require (
@@ -31,5 +31,3 @@ require (
 	golang.org/x/sys v0.40.0 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 )
-
-replace tailscale.com => /home/ubuntu/src/tailscale.com

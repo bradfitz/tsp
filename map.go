@@ -40,10 +40,10 @@ type MapOpts struct {
 // MapSession wraps an in-progress map response stream. Call Next to read
 // each framed, zstd-compressed MapResponse. Call Close when done.
 type MapSession struct {
-	res          *http.Response
-	stream       bool
-	read         int // number of responses read
-	noiseDoer    func(*http.Request) (*http.Response, error)
+	res       *http.Response
+	stream    bool
+	read      int // number of responses read
+	noiseDoer func(*http.Request) (*http.Response, error)
 }
 
 // NoiseRoundTrip sends an HTTP request over the Noise channel used by this map session.
