@@ -102,7 +102,7 @@ var newMachineKeyCmd = &ffcli.Command{
 
 func runNewMachineKey(ctx context.Context, args []string) error {
 	k := key.NewMachine()
-	text := marshalMachineKey(k)
+	text := tsp.MarshalMachineKey(k)
 	text = append(text, '\n')
 	return writeOutput(newMachineKeyArgs.output, text)
 }
@@ -127,7 +127,7 @@ var newNodeKeyCmd = &ffcli.Command{
 
 func runNewNodeKey(ctx context.Context, args []string) error {
 	k := key.NewNode()
-	text := marshalNodeKey(k)
+	text := tsp.MarshalNodeKey(k)
 	text = append(text, '\n')
 	return writeOutput(newNodeKeyArgs.output, text)
 }
@@ -161,58 +161,6 @@ func runDiscoverServerKey(ctx context.Context, args []string) error {
 	}
 	text = append(text, '\n')
 	return writeOutput(discoverServerKeyArgs.output, text)
-}
-
-// nodeFile is the JSON structure for a consolidated node file
-// containing all credentials and server info needed for register/map.
-type nodeFile struct {
-	NodeKey    string `json:"node_key"`
-	MachineKey string `json:"machine_key"`
-	ServerURL  string `json:"server_url"`
-	ServerKey  string `json:"server_key"`
-}
-
-// readNodeFile reads a node JSON file and returns the parsed keys, server URL,
-// and server public key.
-func readNodeFile(path string) (_ key.NodePrivate, _ key.MachinePrivate, serverURL string, _ key.MachinePublic, err error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, err
-	}
-	var nf nodeFile
-	if err := json.Unmarshal(data, &nf); err != nil {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("parsing node file %q: %w", path, err)
-	}
-
-	// Parse node key
-	nkText := []byte(strings.TrimSpace(nf.NodeKey))
-	if !bytes.HasPrefix(nkText, []byte(nodeKeyPrefix)) {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: node_key does not have %q prefix", path, nodeKeyPrefix)
-	}
-	nkText = bytes.Replace(nkText, []byte(nodeKeyPrefix), []byte(oldKeyPrefix), 1)
-	var nodeKey key.NodePrivate
-	if err := nodeKey.UnmarshalText(nkText); err != nil {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing node_key: %w", path, err)
-	}
-
-	// Parse machine key
-	mkText := []byte(strings.TrimSpace(nf.MachineKey))
-	if !bytes.HasPrefix(mkText, []byte(machineKeyPrefix)) {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: machine_key does not have %q prefix", path, machineKeyPrefix)
-	}
-	mkText = bytes.Replace(mkText, []byte(machineKeyPrefix), []byte(oldKeyPrefix), 1)
-	var machineKey key.MachinePrivate
-	if err := machineKey.UnmarshalText(mkText); err != nil {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing machine_key: %w", path, err)
-	}
-
-	// Parse server key
-	var serverKey key.MachinePublic
-	if err := serverKey.UnmarshalText([]byte(strings.TrimSpace(nf.ServerKey))); err != nil {
-		return key.NodePrivate{}, key.MachinePrivate{}, "", key.MachinePublic{}, fmt.Errorf("node file %q: parsing server_key: %w", path, err)
-	}
-
-	return nodeKey, machineKey, nf.ServerURL, serverKey, nil
 }
 
 // new-node
@@ -277,16 +225,10 @@ func runNewNode(ctx context.Context, args []string) error {
 		}
 	}
 
-	serverKeyText, err := serverKey.MarshalText()
-	if err != nil {
-		return fmt.Errorf("marshaling server key: %w", err)
-	}
-
-	nf := nodeFile{
-		NodeKey:    string(marshalNodeKey(nodeKey)),
-		MachineKey: string(marshalMachineKey(machineKey)),
-		ServerURL:  serverURL,
-		ServerKey:  string(serverKeyText),
+	nf := tsp.NodeFile{
+		NodeKey:    string(tsp.MarshalNodeKey(nodeKey)),
+		MachineKey: string(tsp.MarshalMachineKey(machineKey)),
+		ServerInfo: tsp.ServerInfo{URL: serverURL, Key: serverKey},
 	}
 
 	out, err := json.MarshalIndent(nf, "", "  ")
@@ -330,7 +272,7 @@ func runRegister(ctx context.Context, args []string) error {
 		return fmt.Errorf("flag -n (node file) is required")
 	}
 
-	nodeKey, machineKey, nfServerURL, serverKey, err := readNodeFile(registerArgs.nodeFile)
+	nodeKey, machineKey, nfServer, err := tsp.ReadNodeFile(registerArgs.nodeFile)
 	if err != nil {
 		return fmt.Errorf("reading node file: %w", err)
 	}
@@ -351,7 +293,7 @@ func runRegister(ctx context.Context, args []string) error {
 	}
 
 	client, err := tsp.NewClient(tsp.ClientOpts{
-		ServerURL:  cmp.Or(globalArgs.serverURL, nfServerURL),
+		ServerURL:  cmp.Or(globalArgs.serverURL, nfServer.URL),
 		MachineKey: machineKey,
 	})
 	if err != nil {
@@ -366,7 +308,7 @@ func runRegister(ctx context.Context, args []string) error {
 		}
 		client.SetControlPublicKey(controlKey)
 	} else {
-		client.SetControlPublicKey(serverKey)
+		client.SetControlPublicKey(nfServer.Key)
 	}
 
 	resp, err := client.Register(ctx, tsp.RegisterOpts{
@@ -427,19 +369,19 @@ func runMap(ctx context.Context, args []string) error {
 		return fmt.Errorf("flag -n (node file) is required")
 	}
 
-	nodeKey, machineKey, nfServerURL, serverKey, err := readNodeFile(mapArgs.nodeFile)
+	nodeKey, machineKey, nfServer, err := tsp.ReadNodeFile(mapArgs.nodeFile)
 	if err != nil {
 		return fmt.Errorf("reading node file: %w", err)
 	}
 
-	if globalArgs.serverURL != "" && globalArgs.serverURL != nfServerURL {
-		return fmt.Errorf("server URL mismatch: -s flag is %q but node file is for %q", globalArgs.serverURL, nfServerURL)
+	if globalArgs.serverURL != "" && globalArgs.serverURL != nfServer.URL {
+		return fmt.Errorf("server URL mismatch: -s flag is %q but node file is for %q", globalArgs.serverURL, nfServer.URL)
 	}
 
 	hi := hostinfo.New()
 
 	client, err := tsp.NewClient(tsp.ClientOpts{
-		ServerURL:  cmp.Or(globalArgs.serverURL, nfServerURL),
+		ServerURL:  cmp.Or(globalArgs.serverURL, nfServer.URL),
 		MachineKey: machineKey,
 	})
 	if err != nil {
@@ -454,7 +396,7 @@ func runMap(ctx context.Context, args []string) error {
 		}
 		client.SetControlPublicKey(controlKey)
 	} else {
-		client.SetControlPublicKey(serverKey)
+		client.SetControlPublicKey(nfServer.Key)
 	}
 
 	session, err := client.Map(ctx, tsp.MapOpts{
@@ -504,24 +446,6 @@ func runMap(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-}
-
-// marshalMachineKey serializes a MachinePrivate with a "machine-privkey:" prefix.
-func marshalMachineKey(k key.MachinePrivate) []byte {
-	text, err := k.MarshalText()
-	if err != nil {
-		panic(err) // MarshalText on key types never fails
-	}
-	return bytes.Replace(text, []byte(oldKeyPrefix), []byte(machineKeyPrefix), 1)
-}
-
-// marshalNodeKey serializes a NodePrivate with a "node-privkey:" prefix.
-func marshalNodeKey(k key.NodePrivate) []byte {
-	text, err := k.MarshalText()
-	if err != nil {
-		panic(err) // MarshalText on key types never fails
-	}
-	return bytes.Replace(text, []byte(oldKeyPrefix), []byte(nodeKeyPrefix), 1)
 }
 
 // readMachineKeyFile reads a machine key file, validates the "machine-privkey:" prefix,
